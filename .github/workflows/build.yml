@@ -6,6 +6,16 @@ on:
       postgis_version:
         description: 'PostGIS version tag to build (e.g. 3.5.7)'
         required: true
+      platforms:
+        description: 'Which platforms to build'
+        required: true
+        default: 'linux'
+        type: choice
+        options:
+          - linux
+          - macos
+          - windows
+          - all
   push:
     tags:
       - 'v*'
@@ -14,29 +24,43 @@ permissions:
   contents: write
 
 jobs:
+  setup:
+    name: Compute build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      platforms: ${{ steps.set.outputs.platforms }}
+    steps:
+      - id: set
+        run: |
+          # Only workflow_dispatch carries a "platforms" input; a tag push
+          # has none, and defaults to building everything. macOS/Windows are
+          # unvalidated as of writing -- see the repo README -- so a manual
+          # run defaults to linux-only unless told otherwise.
+          selection="${{ github.event.inputs.platforms || 'all' }}"
+
+          linux='{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","script":"build-linux.sh"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","script":"build-linux.sh"}'
+          macos='{"os":"macos-13","target":"x86_64-apple-darwin","script":"build-macos.sh"},{"os":"macos-14","target":"aarch64-apple-darwin","script":"build-macos.sh"}'
+          windows='{"os":"windows-latest","target":"x86_64-pc-windows-msvc","script":"build-windows.sh"}'
+
+          case "$selection" in
+            linux) entries="$linux" ;;
+            macos) entries="$macos" ;;
+            windows) entries="$windows" ;;
+            all) entries="$linux,$macos,$windows" ;;
+            *) echo "unknown platforms selection: $selection" >&2; exit 1 ;;
+          esac
+
+          echo "platforms=[$entries]" >> "$GITHUB_OUTPUT"
+
   build:
-    name: ${{ matrix.target }} / PG${{ matrix.pg_major }}
-    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.platform.target }} / PG${{ matrix.pg_major }}
+    needs: [setup]
+    runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
       matrix:
         pg_major: ['13', '14', '15', '16', '17']
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            script: build-linux.sh
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            script: build-linux.sh
-          - os: macos-13
-            target: x86_64-apple-darwin
-            script: build-macos.sh
-          - os: macos-14
-            target: aarch64-apple-darwin
-            script: build-macos.sh
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            script: build-windows.sh
+        platform: ${{ fromJson(needs.setup.outputs.platforms) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -73,24 +97,24 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           chmod +x build-linux.sh
-          ./build-linux.sh "${{ steps.version.outputs.version }}" "${{ matrix.pg_major }}" "${{ matrix.target }}"
+          ./build-linux.sh "${{ steps.version.outputs.version }}" "${{ matrix.pg_major }}" "${{ matrix.platform.target }}"
 
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: |
           chmod +x build-macos.sh
-          ./build-macos.sh "${{ steps.version.outputs.version }}" "${{ matrix.pg_major }}" "${{ matrix.target }}"
+          ./build-macos.sh "${{ steps.version.outputs.version }}" "${{ matrix.pg_major }}" "${{ matrix.platform.target }}"
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: |
           chmod +x build-windows.sh
-          ./build-windows.sh "${{ steps.version.outputs.version }}" "${{ matrix.pg_major }}" "${{ matrix.target }}"
+          ./build-windows.sh "${{ steps.version.outputs.version }}" "${{ matrix.pg_major }}" "${{ matrix.platform.target }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: postgis-${{ steps.version.outputs.version }}-pg${{ matrix.pg_major }}-${{ matrix.target }}
+          name: postgis-${{ steps.version.outputs.version }}-pg${{ matrix.pg_major }}-${{ matrix.platform.target }}
           path: |
             work-*/postgis-*.tar.gz
             work-*/postgis-*.zip
