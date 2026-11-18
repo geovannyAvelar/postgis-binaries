@@ -16,6 +16,11 @@ on:
           - macos
           - windows
           - all
+      publish:
+        description: 'Publish a release when the builds and tests pass (off: only build and test)'
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - 'v*'
@@ -38,7 +43,11 @@ jobs:
           # run defaults to linux-only unless told otherwise.
           selection="${{ github.event.inputs.platforms || 'all' }}"
 
-          linux='{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","script":"build-linux.sh"},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","script":"build-linux.sh"}'
+          # Linux builds run in a Debian 11 container (glibc 2.31), older than
+          # the theseus-rs binaries' own glibc baseline (2.34), so the result
+          # runs everywhere the PostgreSQL it overlays runs. See
+          # build-linux.sh.
+          linux='{"os":"ubuntu-24.04","container":"debian:bullseye","target":"x86_64-unknown-linux-gnu","script":"build-linux.sh"},{"os":"ubuntu-24.04-arm","container":"debian:bullseye","target":"aarch64-unknown-linux-gnu","script":"build-linux.sh"}'
           macos='{"os":"macos-13","target":"x86_64-apple-darwin","script":"build-macos.sh"},{"os":"macos-14","target":"aarch64-apple-darwin","script":"build-macos.sh"}'
           windows='{"os":"windows-latest","target":"x86_64-pc-windows-msvc","script":"build-windows.sh"}'
 
@@ -59,18 +68,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_major: ['13', '14', '15', '16', '17']
+        pg_major: ['13', '14', '15', '16', '17', '18']
         platform: ${{ fromJson(needs.setup.outputs.platforms) }}
+    # Empty (no container) for macOS and Windows.
+    container: ${{ matrix.platform.container }}
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgeos-dev libproj-dev libjson-c-dev libxml2-dev \
-            autoconf automake libtool patchelf pkg-config perl gcc make
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git \
+            libjson-c-dev libxml2-dev libsqlite3-dev sqlite3 \
+            autoconf automake libtool patchelf pkg-config perl cmake \
+            gcc g++ make binutils file xz-utils
+
+      - uses: actions/checkout@v4
 
       - name: Set up MSYS2
         if: runner.os == 'Windows'
@@ -120,9 +135,71 @@ jobs:
             work-*/postgis-*.zip
           if-no-files-found: error
 
+  # Installs each Linux archive over its PostgreSQL release on other
+  # distributions than the one it was built on -- the oldest and newest
+  # glibc the binaries should support among them -- and runs the smoke test
+  # there. Catches a package that needs a newer glibc than the system has,
+  # or a library PostgreSQL ships that isn't compatible.
+  test-linux:
+    name: Test on ${{ matrix.distro }} (${{ matrix.target }})
+    needs: [setup, build]
+    if: contains(needs.setup.outputs.platforms, 'linux-gnu')
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.distro }}
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: ['debian:bookworm', 'ubuntu:22.04', 'rockylinux:9', 'ubuntu:24.04', 'fedora:41']
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install test dependencies
+        run: |
+          if command -v apt-get >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tar gzip passwd util-linux
+          else
+            dnf install -y ca-certificates tar gzip shadow-utils util-linux --allowerasing
+            command -v curl >/dev/null || dnf install -y curl --allowerasing
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: postgis-*-${{ matrix.target }}
+          path: artifacts
+
+      - name: Smoke-test every PostgreSQL major
+        shell: bash
+        run: |
+          set -euo pipefail
+          archives=$(find artifacts -name "postgis-*-${{ matrix.target }}.tar.gz" | sort)
+          [ -n "$archives" ] || { echo "no archives for ${{ matrix.target }}" >&2; exit 1; }
+          for archive in $archives; do
+            pg_major=$(basename "$archive" | sed -E 's/^postgis-[0-9.]+-pg([0-9]+)-.*/\1/')
+            pg_tag=$(./resolve-pg-tag.sh "$pg_major")
+            echo "::group::PostgreSQL ${pg_tag}: $(basename "$archive")"
+            curl -fsSL -o pg.tar.gz \
+              "https://github.com/theseus-rs/postgresql-binaries/releases/download/${pg_tag}/postgresql-${pg_tag}-${{ matrix.target }}.tar.gz"
+            ./smoke-test-linux.sh "$archive" pg.tar.gz
+            echo "::endgroup::"
+          done
+
   release:
     name: Publish release
-    needs: [build]
+    needs: [build, test-linux]
+    # A tag push always publishes; a manual run only when asked to, so
+    # builds can be tried out without replacing a published release.
+    if: >-
+      always() && needs.build.result == 'success' &&
+      (needs.test-linux.result == 'success' || needs.test-linux.result == 'skipped') &&
+      (github.event_name == 'push' || github.event.inputs.publish == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -132,7 +209,7 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p release
-          find artifacts -type f -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} release/ \;
           ls -la release
 
       - name: Determine tag
@@ -150,6 +227,9 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
           files: release/*
+          # Rebuilding a version replaces its archives in the existing
+          # release; pachyderm verifies each against its GitHub digest.
+          overwrite_files: true
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

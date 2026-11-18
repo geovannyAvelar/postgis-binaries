@@ -4,8 +4,21 @@
 # package expects (a single top-level dir, overlaid onto an existing
 # theseus-rs postgresql-binaries install).
 #
-# Validated locally against PostGIS 3.5.7 / PostgreSQL 17.11 / x86_64-unknown-linux-gnu.
-# NOT yet validated: linux/arm64, macOS, Windows, --with-raster (GDAL).
+# Build it on an OLD distribution -- CI uses Debian 11 (glibc 2.31) -- not
+# on the runner itself. Everything built here, and every library bundled
+# from this system, needs at least this system's glibc. Building older than
+# theseus-rs's own baseline (its binaries need glibc 2.34) means the archive
+# runs anywhere the PostgreSQL it overlays runs; building on a newer system
+# (e.g. ubuntu-24.04, glibc 2.39) produced archives that needed glibc 2.38
+# and left PostgreSQL itself unable to start on Debian 12 / Ubuntu 22.04 /
+# RHEL 9, because they also replaced PostgreSQL's own libraries.
+#
+# Libraries PostgreSQL already ships in its lib/ (libxml2, libstdc++, zlib,
+# krb5, ...) are never bundled: the extension uses PostgreSQL's copies,
+# which, being newer than this build system's, are ABI-compatible. Nothing
+# in the archive overwrites a file of the PostgreSQL install. The script
+# checks both, plus the glibc limit, then smoke-tests the result (see
+# smoke-test-linux.sh), and fails on any violation.
 #
 # Usage: ./build-linux.sh <postgis-version> <pg-major> <target-triple>
 # Example: ./build-linux.sh 3.5.7 17 x86_64-unknown-linux-gnu
@@ -26,19 +39,15 @@ TARGET="${3:?missing target-triple}"
 # in a system dir already.
 export PATH="/usr/bin:/usr/local/bin:/bin:$PATH"
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 WORKDIR="$(pwd)/work-${POSTGIS_VERSION}-pg${PG_MAJOR}-${TARGET}"
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 
 echo "==> Resolving theseus-rs postgresql-binaries tag for PG ${PG_MAJOR}"
-PG_TAG=$(curl -fsSL "https://api.github.com/repos/theseus-rs/postgresql-binaries/releases?per_page=100" \
-  | grep -o "\"tag_name\": \"${PG_MAJOR}\.[0-9]*\.[0-9]*\"" \
-  | head -1 | cut -d'"' -f4)
-if [ -z "$PG_TAG" ]; then
-  echo "no theseus-rs release found for PG major ${PG_MAJOR}" >&2
-  exit 1
-fi
+PG_TAG=$("$SCRIPT_DIR/resolve-pg-tag.sh" "$PG_MAJOR")
 echo "    using ${PG_TAG}"
 
 echo "==> Downloading Postgres ${PG_TAG} (${TARGET})"
@@ -47,6 +56,34 @@ curl -fsSL -o pg.tar.gz \
 mkdir -p pg
 tar -xzf pg.tar.gz -C pg --strip-components=1
 PG_CONFIG="$WORKDIR/pg/bin/pg_config"
+
+# GEOS and PROJ are built from source instead of taken from the build
+# system: its packages (Debian 11: GEOS 3.9, PROJ 7.2) are too old for all
+# of PostGIS's functionality, and building PROJ without curl and libtiff
+# drops most of what it would otherwise pull into the archive. Its
+# sqlite3 is PostgreSQL's own copy at runtime.
+GEOS_VERSION="${GEOS_VERSION:-3.13.1}"
+PROJ_VERSION="${PROJ_VERSION:-9.7.1}"
+DEPS="$WORKDIR/deps"
+export PKG_CONFIG_PATH="$DEPS/lib/pkgconfig"
+export LD_LIBRARY_PATH="$DEPS/lib"
+
+echo "==> Building GEOS ${GEOS_VERSION}"
+git clone --branch "${GEOS_VERSION}" --depth 1 https://github.com/libgeos/geos.git geos-src
+cmake -S geos-src -B geos-build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$DEPS" -DCMAKE_INSTALL_LIBDIR=lib \
+  -DBUILD_TESTING=OFF -DBUILD_DOCUMENTATION=OFF >/dev/null
+cmake --build geos-build -j"$(nproc)" >/dev/null
+cmake --install geos-build >/dev/null
+
+echo "==> Building PROJ ${PROJ_VERSION}"
+git clone --branch "${PROJ_VERSION}" --depth 1 https://github.com/OSGeo/PROJ.git proj-src
+cmake -S proj-src -B proj-build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$DEPS" -DCMAKE_INSTALL_LIBDIR=lib \
+  -DENABLE_CURL=OFF -DENABLE_TIFF=OFF -DBUILD_APPS=OFF \
+  -DBUILD_TESTING=OFF -DBUILD_SHARED_LIBS=ON >/dev/null
+cmake --build proj-build -j"$(nproc)" >/dev/null
+cmake --install proj-build >/dev/null
 
 echo "==> Cloning PostGIS ${POSTGIS_VERSION}"
 git clone --branch "${POSTGIS_VERSION}" --depth 1 https://github.com/postgis/postgis.git src
@@ -63,6 +100,8 @@ echo "==> configure"
 # --without-protobuf: not evaluated yet either; drop if MVT support is needed.
 ./configure \
   --with-pgconfig="$PG_CONFIG" \
+  --with-geosconfig="$DEPS/bin/geos-config" \
+  --with-projdir="$DEPS" \
   --with-xml2config=/usr/bin/xml2-config \
   --without-raster \
   --without-sfcgal \
@@ -92,16 +131,31 @@ for ext in postgis postgis_topology address_standardizer address_standardizer_da
 done
 
 echo "==> Bundling runtime dependencies"
-# Anything not in this allowlist gets a copy placed next to the extension
-# .so's, with RPATH rewritten to $ORIGIN so the bundled copy is preferred
-# over (possibly absent, possibly incompatible) system libraries.
-ALLOW='^(linux-vdso\.so|ld-linux-x86-64\.so|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so)'
+# glibc itself (and the loader) is the system's: never bundled. Everything
+# else the extensions need gets a copy placed next to them, with RPATH
+# rewritten to $ORIGIN -- which, once overlaid, is the PostgreSQL install's
+# lib/ -- unless PostgreSQL already ships that library there.
+GLIBC='^(linux-vdso\.so|ld-linux-.*\.so|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so|libutil\.so|libanl\.so)'
 
-closure() { ldd "$1" | awk '{print $3}' | grep -v '^$'; }
+# Resolve the way the installed extension will: PostgreSQL's lib/ first (a
+# library found there is used as is, and so are its own dependencies),
+# then the GEOS/PROJ just built, then the system.
+closure() {
+  LD_LIBRARY_PATH="$WORKDIR/pg/lib:$DEPS/lib" ldd "$1" | awk '/=>/ {print $3}' | grep -v '^$' || true
+}
 
 TO_BUNDLE=$(for so in "$PKG"/lib/*.so; do closure "$so"; done | sort -u | while read -r p; do
   base=$(basename "$p")
-  echo "$base" | grep -qE "$ALLOW" || echo "$p"
+  if echo "$base" | grep -qE "$GLIBC"; then
+    continue
+  fi
+  case "$p" in
+    "$WORKDIR/pg/lib/"*)
+      echo "    using PostgreSQL's own $base" >&2
+      continue ;;
+  esac
+  echo "    bundling $p" >&2
+  echo "$p"
 done)
 
 echo "$TO_BUNDLE" | while read -r lib; do
@@ -112,21 +166,52 @@ for so in "$PKG"/lib/*; do
   [ -f "$so" ] && [ ! -L "$so" ] && patchelf --set-rpath '$ORIGIN' "$so"
 done
 
-echo "==> Verifying no unresolved / stray system deps remain"
-for so in "$PKG"/lib/*.so; do
-  unresolved=$(ldd "$so" | grep "not found" || true)
-  if [ -n "$unresolved" ]; then
-    echo "UNRESOLVED in $so:" >&2
-    echo "$unresolved" >&2
-    exit 1
-  fi
-done
+echo "==> Bundling PROJ's database"
+# ST_Transform and friends need proj.db, which the bundled libproj looks
+# for in ../share/proj relative to itself -- i.e. the PostgreSQL install's
+# share/proj once overlaid. Users' systems mostly don't have it installed.
+PROJ_DB="$DEPS/share/proj/proj.db"
+if [ ! -f "$PROJ_DB" ]; then
+  echo "proj.db not found in the PROJ build ($PROJ_DB)" >&2
+  exit 1
+fi
+mkdir -p "$PKG/share/proj"
+cp "$PROJ_DB" "$PKG/share/proj/"
+[ -f "$(dirname "$PROJ_DB")/proj.ini" ] && cp "$(dirname "$PROJ_DB")/proj.ini" "$PKG/share/proj/"
+
+echo "==> Checking nothing in the package overwrites PostgreSQL's own files"
+clashes=$(cd "$PKG" && find . -type f -o -type l | sed 's|^\./||' | while read -r f; do
+  [ -e "$WORKDIR/pg/$f" ] && echo "$f"
+done || true)
+if [ -n "$clashes" ]; then
+  echo "These files would replace PostgreSQL's own:" >&2
+  echo "$clashes" >&2
+  exit 1
+fi
+
+echo "==> Checking the glibc the package needs against PostgreSQL's"
+max_glibc() {
+  for f in "$@"; do
+    objdump -T "$f" 2>/dev/null | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' || true
+  done | sed 's/GLIBC_//' | sort -V | tail -1
+}
+PKG_GLIBC=$(max_glibc "$PKG"/lib/*)
+PG_GLIBC=$(max_glibc "$WORKDIR"/pg/bin/postgres "$WORKDIR"/pg/lib/*.so*)
+echo "    package needs glibc ${PKG_GLIBC}; PostgreSQL ${PG_TAG} needs ${PG_GLIBC}"
+if [ "$(printf '%s\n%s\n' "$PKG_GLIBC" "$PG_GLIBC" | sort -V | tail -1)" != "$PG_GLIBC" ]; then
+  echo "The package needs a newer glibc (${PKG_GLIBC}) than PostgreSQL itself (${PG_GLIBC}); build on an older system." >&2
+  exit 1
+fi
 
 echo "==> Packaging archive"
 ARCHIVE_NAME="postgis-${POSTGIS_VERSION}-pg${PG_MAJOR}-${TARGET}"
 mkdir -p "$WORKDIR/out/${ARCHIVE_NAME}"
 cp -r "$PKG"/* "$WORKDIR/out/${ARCHIVE_NAME}/"
 tar -czf "$WORKDIR/${ARCHIVE_NAME}.tar.gz" -C "$WORKDIR/out" "${ARCHIVE_NAME}"
+
+echo "==> Smoke test"
+unset LD_LIBRARY_PATH
+"$SCRIPT_DIR/smoke-test-linux.sh" "$WORKDIR/${ARCHIVE_NAME}.tar.gz" "$WORKDIR/pg.tar.gz"
 
 echo "==> Done: $WORKDIR/${ARCHIVE_NAME}.tar.gz"
 du -h "$WORKDIR/${ARCHIVE_NAME}.tar.gz"
