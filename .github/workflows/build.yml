@@ -84,7 +84,7 @@ jobs:
             ca-certificates curl git \
             json-c-devel libxml2-devel sqlite-devel sqlite \
             autoconf automake libtool patchelf pkgconf-pkg-config perl cmake \
-            gcc gcc-c++ make binutils file xz findutils
+            gcc gcc-c++ make binutils file xz findutils which diffutils bison flex
 
       - uses: actions/checkout@v4
 
