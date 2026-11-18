@@ -186,7 +186,7 @@ jobs:
             pg_major=$(basename "$archive" | sed -E 's/^postgis-[0-9.]+-pg([0-9]+)-.*/\1/')
             pg_tag=$(./resolve-pg-tag.sh "$pg_major")
             echo "::group::PostgreSQL ${pg_tag}: $(basename "$archive")"
-            curl -fsSL -o pg.tar.gz \
+            curl -fsSL --retry 5 --retry-all-errors -o pg.tar.gz \
               "https://github.com/theseus-rs/postgresql-binaries/releases/download/${pg_tag}/postgresql-${pg_tag}-${{ matrix.target }}.tar.gz"
             ./smoke-test-linux.sh "$archive" pg.tar.gz
             echo "::endgroup::"

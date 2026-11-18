@@ -53,7 +53,7 @@ PG_TAG=$("$SCRIPT_DIR/resolve-pg-tag.sh" "$PG_MAJOR")
 echo "    using ${PG_TAG}"
 
 echo "==> Downloading Postgres ${PG_TAG} (${TARGET})"
-curl -fsSL -o pg.tar.gz \
+curl -fsSL --retry 5 --retry-all-errors -o pg.tar.gz \
   "https://github.com/theseus-rs/postgresql-binaries/releases/download/${PG_TAG}/postgresql-${PG_TAG}-${TARGET}.tar.gz"
 mkdir -p pg
 tar -xzf pg.tar.gz -C pg --strip-components=1
@@ -110,7 +110,9 @@ echo "==> configure"
   --without-protobuf
 
 echo "==> make"
-make -j"$(nproc)"
+# PostGIS's Makefiles occasionally race under -j (seen generating
+# rtpostgis_upgrade.sql.in); finish serially if the parallel build fails.
+make -j"$(nproc)" || { echo "    parallel make failed; retrying serially"; make; }
 
 echo "==> make install (staged)"
 STAGE="$WORKDIR/stage"
@@ -133,11 +135,14 @@ for ext in postgis postgis_topology address_standardizer address_standardizer_da
 done
 
 echo "==> Bundling runtime dependencies"
-# glibc itself (and the loader) is the system's: never bundled. Everything
-# else the extensions need gets a copy placed next to them, with RPATH
-# rewritten to $ORIGIN -- which, once overlaid, is the PostgreSQL install's
-# lib/ -- unless PostgreSQL already ships that library there.
-GLIBC='^(linux-vdso\.so|ld-linux-.*\.so|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so|libutil\.so|libanl\.so)'
+# glibc itself (and the loader) is the system's: never bundled; so is
+# libgcc_s, which every glibc system has (glibc loads it itself, for
+# pthread_cancel) -- and the build system's would need glibc 2.35 for
+# RHEL 9's backported _dl_find_object. Everything else the extensions need
+# gets a copy placed next to them, with RPATH rewritten to $ORIGIN --
+# which, once overlaid, is the PostgreSQL install's lib/ -- unless
+# PostgreSQL already ships that library there.
+GLIBC='^(linux-vdso\.so|ld-linux-.*\.so|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so|libutil\.so|libanl\.so|libgcc_s\.so)'
 
 # Resolve the way the installed extension will: PostgreSQL's lib/ first (a
 # library found there is used as is, and so are its own dependencies),

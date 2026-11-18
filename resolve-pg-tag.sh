@@ -13,7 +13,7 @@ auth=()
 
 tags=""
 for page in 1 2 3 4 5 6 7 8 9 10; do
-  body=$(curl -fsSL "${auth[@]}" "https://api.github.com/repos/theseus-rs/postgresql-binaries/releases?per_page=100&page=${page}")
+  body=$(curl -fsSL --retry 5 --retry-all-errors "${auth[@]}" "https://api.github.com/repos/theseus-rs/postgresql-binaries/releases?per_page=100&page=${page}")
   page_tags=$(printf '%s' "$body" | grep -oE '"tag_name": *"[0-9.]+"' | grep -oE '[0-9]+(\.[0-9]+)+' || true)
   [ -n "$page_tags" ] || break
   tags="$tags"$'\n'"$page_tags"
