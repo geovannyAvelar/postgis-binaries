@@ -137,6 +137,15 @@ for ext in postgis postgis_topology address_standardizer address_standardizer_da
     "$PKG/share/extension/" 2>/dev/null || true
 done
 
+# configure silently drops a module whose dependency is missing (e.g.
+# address_standardizer without PCRE), so check every one made it.
+for ext in postgis postgis_topology address_standardizer address_standardizer_data_us; do
+  if [ ! -f "$PKG/share/extension/${ext}.control" ]; then
+    echo "extension ${ext} wasn't built; check configure's output for a missing dependency" >&2
+    exit 1
+  fi
+done
+
 echo "==> Bundling runtime dependencies"
 # glibc itself (and the loader) is the system's: never bundled; so is
 # libgcc_s, which every glibc system has (glibc loads it itself, for

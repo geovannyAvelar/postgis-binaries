@@ -10,6 +10,9 @@
 # Run it as root or as a regular user; as root, PostgreSQL itself runs as a
 # throwaway "pgsmoke" user (initdb refuses to run as root).
 #
+# Exits 77 if PostgreSQL itself can't run on this system (some theseus-rs
+# releases need system libraries it may lack), so there's nothing to test.
+#
 # Usage: ./smoke-test-linux.sh <postgis-archive.tar.gz> <postgresql-archive.tar.gz>
 
 set -euo pipefail
@@ -25,6 +28,18 @@ trap 'rm -rf "$DIR"' EXIT
 INSTALL="$DIR/pg"
 mkdir -p "$INSTALL"
 tar -xzf "$PG_ARCHIVE" -C "$INSTALL" --strip-components=1
+
+# Some theseus-rs releases (e.g. PostgreSQL 13) aren't self-contained: they
+# link system libraries (a specific ICU, OpenSSL, krb5, readline) that not
+# every distribution has. Where PostgreSQL itself can't run, there's
+# nothing to test PostGIS in: exit 77 ("skipped").
+missing=$(for f in "$INSTALL"/bin/postgres "$INSTALL"/bin/psql; do ldd "$f" 2>&1 | grep "not found" || true; done)
+if [ -n "$missing" ]; then
+  echo "==> Skipped: PostgreSQL itself doesn't run on this system:"
+  echo "$missing" | sed 's/^[[:space:]]*/    /'
+  exit 77
+fi
+
 tar -xzf "$POSTGIS_ARCHIVE" -C "$INSTALL" --strip-components=1
 
 echo "==> Checking every library resolves ($(getconf GNU_LIBC_VERSION 2>/dev/null || echo 'unknown libc'))"

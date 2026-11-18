@@ -82,7 +82,7 @@ jobs:
           dnf config-manager --set-enabled crb
           dnf install -y --allowerasing \
             ca-certificates curl git \
-            json-c-devel libxml2-devel sqlite-devel sqlite \
+            json-c-devel libxml2-devel sqlite-devel sqlite pcre2-devel \
             autoconf automake libtool patchelf pkgconf-pkg-config perl cmake \
             gcc gcc-c++ make binutils file xz findutils which diffutils bison flex
 
@@ -164,6 +164,11 @@ jobs:
         run: |
           if command -v apt-get >/dev/null; then
             apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tar gzip passwd util-linux
+            # Older theseus-rs releases (e.g. PostgreSQL 13) link these from
+            # the system instead of shipping them; names vary by release.
+            for pkg in "libreadline8t64 libreadline8" "libssl3t64 libssl3" "libgssapi-krb5-2"; do
+              for name in $pkg; do apt-get install -y --no-install-recommends "$name" && break || true; done
+            done
           else
             dnf install -y ca-certificates tar gzip shadow-utils util-linux --allowerasing
             command -v curl >/dev/null || dnf install -y curl --allowerasing
@@ -188,9 +193,17 @@ jobs:
             echo "::group::PostgreSQL ${pg_tag}: $(basename "$archive")"
             curl -fsSL --retry 5 --retry-all-errors -o pg.tar.gz \
               "https://github.com/theseus-rs/postgresql-binaries/releases/download/${pg_tag}/postgresql-${pg_tag}-${{ matrix.target }}.tar.gz"
-            ./smoke-test-linux.sh "$archive" pg.tar.gz
+            status=0
+            ./smoke-test-linux.sh "$archive" pg.tar.gz || status=$?
             echo "::endgroup::"
+            case "$status" in
+              0) tested=$((tested + 1)) ;;
+              77) echo "::notice::PostgreSQL ${pg_tag} itself doesn't run on ${{ matrix.distro }}; skipped" ;;
+              *) exit "$status" ;;
+            esac
           done
+          # Each distro must have tested at least one archive for real.
+          [ "${tested:-0}" -gt 0 ] || { echo "no archive could be tested here" >&2; exit 1; }
 
   release:
     name: Publish release
