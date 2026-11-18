@@ -10,7 +10,7 @@ result. No PostGIS source is patched.
 
 | Platform | Script | Validated |
 |---|---|---|
-| linux/amd64 | `build-linux.sh` | **Yes** — every build is smoke-tested, in CI, on Debian 12, Ubuntu 22.04 and 24.04, Rocky Linux 9 and Fedora 41 |
+| linux/amd64 | `build-linux.sh` | **Yes** — every build is smoke-tested, in CI, on Debian 12 and 13, Ubuntu 24.04 and Fedora 41 |
 | linux/arm64 | `build-linux.sh` | **Yes** — same as amd64, on arm64 runners |
 | macOS (both arches) | `build-macos.sh` | No — written from the same design, not run on real hardware |
 | Windows/amd64 | `build-windows.sh` | No — the least standardized of the three; see caveats in the script itself |
@@ -52,18 +52,25 @@ the CI runner itself:
    archive over it, as pachyderm does, checks every library and symbol
    version resolves (`ldd`), starts a cluster, creates every extension,
    and runs GEOS, PROJ, GML, GeoJSON, topology and address-standardizer
-   queries. CI then repeats this on other distributions.
+   queries — if the build system can run that PostgreSQL; CI runs it on
+   other distributions either way.
 
 ### Why the old glibc
 
 Everything built, and every library bundled from the build system, needs
 at least that system's glibc. The theseus-rs PostgreSQL binaries need glibc
-2.34, so building on a system with that glibc (or older) makes PostGIS run
-wherever the PostgreSQL it overlays runs. (Debian 11, with glibc 2.31,
-would be older still, but its LTS support ended in 2026 and its security
-packages are gone from the mirrors.) Archives built on Ubuntu 24.04 (before
+2.36 (their bundled libstdc++, libcrypt, ... do), so building on an older
+system makes PostGIS run wherever the PostgreSQL it overlays runs, and the
+build fails if the package would ever need more than PostgreSQL does.
+(Debian 11, with glibc 2.31, would be older still, but its LTS support
+ended in 2026 and its security packages are gone from the mirrors.)
+
+Because the build system is older than PostgreSQL's own requirement, it
+can't run that PostgreSQL, so the smoke test runs in the `test-linux` CI
+job instead, on Debian 12 (glibc 2.36, the oldest PostgreSQL itself runs
+on) and newer distributions. Archives built on Ubuntu 24.04 (before
 2026-11) needed glibc 2.38 and replaced 15 of PostgreSQL's own libraries,
-which left PostgreSQL unable to start on Debian 12, Ubuntu 22.04 and RHEL 9.
+which left PostgreSQL unable to start on Debian 12.
 
 ### Building and publishing
 

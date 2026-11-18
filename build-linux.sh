@@ -6,9 +6,10 @@
 #
 # Build it on an OLD distribution -- CI uses AlmaLinux 9 (glibc 2.34) --
 # not on the runner itself. Everything built here, and every library
-# bundled from this system, needs at least this system's glibc. Building on
-# theseus-rs's own baseline (its binaries need glibc 2.34) or older means
-# the archive runs anywhere the PostgreSQL it overlays runs; building on a newer system
+# bundled from this system, needs at least this system's glibc. Building
+# older than the theseus-rs binaries themselves (their bundled libstdc++
+# etc. need glibc 2.36) means the archive runs anywhere the PostgreSQL it
+# overlays runs, and the build checks that it does; building on a newer system
 # (e.g. ubuntu-24.04, glibc 2.39) produced archives that needed glibc 2.38
 # and left PostgreSQL itself unable to start on Debian 12 / Ubuntu 22.04 /
 # RHEL 9, because they also replaced PostgreSQL's own libraries.
@@ -18,7 +19,8 @@
 # which, being newer than this build system's, are ABI-compatible. Nothing
 # in the archive overwrites a file of the PostgreSQL install. The script
 # checks both, plus the glibc limit, then smoke-tests the result (see
-# smoke-test-linux.sh), and fails on any violation.
+# smoke-test-linux.sh) if this system can run that PostgreSQL, and fails
+# on any violation.
 #
 # Usage: ./build-linux.sh <postgis-version> <pg-major> <target-triple>
 # Example: ./build-linux.sh 3.5.7 17 x86_64-unknown-linux-gnu
@@ -209,9 +211,17 @@ mkdir -p "$WORKDIR/out/${ARCHIVE_NAME}"
 cp -r "$PKG"/* "$WORKDIR/out/${ARCHIVE_NAME}/"
 tar -czf "$WORKDIR/${ARCHIVE_NAME}.tar.gz" -C "$WORKDIR/out" "${ARCHIVE_NAME}"
 
-echo "==> Smoke test"
-unset LD_LIBRARY_PATH
-"$SCRIPT_DIR/smoke-test-linux.sh" "$WORKDIR/${ARCHIVE_NAME}.tar.gz" "$WORKDIR/pg.tar.gz"
+# The build system's glibc is deliberately old -- possibly too old to run
+# this PostgreSQL release at all. Smoke-test here only if it can; CI's
+# test-linux job runs the same test on newer distributions either way.
+SYSTEM_GLIBC=$(getconf GNU_LIBC_VERSION | awk '{print $2}')
+if [ "$(printf '%s\n%s\n' "$SYSTEM_GLIBC" "$PG_GLIBC" | sort -V | tail -1)" = "$SYSTEM_GLIBC" ]; then
+  echo "==> Smoke test"
+  unset LD_LIBRARY_PATH
+  "$SCRIPT_DIR/smoke-test-linux.sh" "$WORKDIR/${ARCHIVE_NAME}.tar.gz" "$WORKDIR/pg.tar.gz"
+else
+  echo "==> Skipping the smoke test: PostgreSQL ${PG_TAG} needs glibc ${PG_GLIBC}, this system has ${SYSTEM_GLIBC}"
+fi
 
 echo "==> Done: $WORKDIR/${ARCHIVE_NAME}.tar.gz"
 du -h "$WORKDIR/${ARCHIVE_NAME}.tar.gz"

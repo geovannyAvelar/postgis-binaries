@@ -43,8 +43,8 @@ jobs:
           # run defaults to linux-only unless told otherwise.
           selection="${{ github.event.inputs.platforms || 'all' }}"
 
-          # Linux builds run in an AlmaLinux 9 container (glibc 2.34, the
-          # theseus-rs binaries' own glibc baseline), so the result runs
+          # Linux builds run in an AlmaLinux 9 container (glibc 2.34, older
+          # than the theseus-rs binaries' own 2.36), so the result runs
           # everywhere the PostgreSQL it overlays runs. See build-linux.sh.
           linux='{"os":"ubuntu-24.04","container":"almalinux:9","target":"x86_64-unknown-linux-gnu","script":"build-linux.sh"},{"os":"ubuntu-24.04-arm","container":"almalinux:9","target":"aarch64-unknown-linux-gnu","script":"build-linux.sh"}'
           macos='{"os":"macos-13","target":"x86_64-apple-darwin","script":"build-macos.sh"},{"os":"macos-14","target":"aarch64-apple-darwin","script":"build-macos.sh"}'
@@ -136,9 +136,9 @@ jobs:
             work-*/postgis-*.zip
           if-no-files-found: error
 
-  # Installs each Linux archive over its PostgreSQL release on other
-  # distributions than the one it was built on -- the oldest and newest
-  # glibc the binaries should support among them -- and runs the smoke test
+  # Installs each Linux archive over its PostgreSQL release on clean
+  # distributions -- from the oldest glibc the theseus-rs PostgreSQL itself
+  # runs on (Debian 12, 2.36) to current ones -- and runs the smoke test
   # there. Catches a package that needs a newer glibc than the system has,
   # or a library PostgreSQL ships that isn't compatible.
   test-linux:
@@ -150,7 +150,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: ['debian:bookworm', 'ubuntu:22.04', 'rockylinux:9', 'ubuntu:24.04', 'fedora:41']
+        distro: ['debian:bookworm', 'debian:trixie', 'ubuntu:24.04', 'fedora:41']
         target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
         include:
           - target: x86_64-unknown-linux-gnu
