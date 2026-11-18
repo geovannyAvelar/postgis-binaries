@@ -166,7 +166,7 @@ jobs:
             apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tar gzip passwd util-linux
             # Older theseus-rs releases (e.g. PostgreSQL 13) link these from
             # the system instead of shipping them; names vary by release.
-            for pkg in "libreadline8t64 libreadline8" "libssl3t64 libssl3" "libgssapi-krb5-2"; do
+            for pkg in "libreadline8t64 libreadline8" "libssl3t64 libssl3" "libgssapi-krb5-2" "libicu72"; do
               for name in $pkg; do apt-get install -y --no-install-recommends "$name" && break || true; done
             done
           else
@@ -187,6 +187,7 @@ jobs:
           set -euo pipefail
           archives=$(find artifacts -name "postgis-*-${{ matrix.target }}.tar.gz" | sort)
           [ -n "$archives" ] || { echo "no archives for ${{ matrix.target }}" >&2; exit 1; }
+          tested=0
           for archive in $archives; do
             pg_major=$(basename "$archive" | sed -E 's/^postgis-[0-9.]+-pg([0-9]+)-.*/\1/')
             pg_tag=$(./resolve-pg-tag.sh "$pg_major")
@@ -203,7 +204,7 @@ jobs:
             esac
           done
           # Each distro must have tested at least one archive for real.
-          [ "${tested:-0}" -gt 0 ] || { echo "no archive could be tested here" >&2; exit 1; }
+          [ "$tested" -gt 0 ] || { echo "no archive could be tested here" >&2; exit 1; }
 
   release:
     name: Publish release
