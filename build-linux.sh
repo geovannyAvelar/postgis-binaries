@@ -110,9 +110,12 @@ echo "==> configure"
   --without-protobuf
 
 echo "==> make"
-# PostGIS's Makefiles occasionally race under -j (seen generating
-# rtpostgis_upgrade.sql.in); finish serially if the parallel build fails.
-make -j"$(nproc)" || { echo "    parallel make failed; retrying serially"; make; }
+# Serially: PostGIS's Makefiles race under -j (utils/ generates
+# raster/rt_pg/rtpostgis_upgrade.sql from a rtpostgis.sql that may still
+# be half-written, even --without-raster), and a failed run leaves that
+# broken file behind for the next one. GEOS and PROJ, the slow part, are
+# built in parallel above.
+make
 
 echo "==> make install (staged)"
 STAGE="$WORKDIR/stage"
