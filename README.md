@@ -50,7 +50,7 @@ the CI runner itself:
    single-top-dir archive: `postgis-<version>-pg<major>-<target-triple>.tar.gz`.
 7. Smoke-tests it (`smoke-test-linux.sh`): extracts PostgreSQL and the
    archive over it, as pachyderm does, checks every library and symbol
-   version resolves (`ldd -r`), starts a cluster, creates every extension,
+   version resolves (`ldd`), starts a cluster, creates every extension,
    and runs GEOS, PROJ, GML, GeoJSON, topology and address-standardizer
    queries. CI then repeats this on other distributions.
 

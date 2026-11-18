@@ -3,7 +3,7 @@
 # theseus-rs PostgreSQL install -- and check it works on this system:
 #
 #   - every library in the overlaid install resolves, with the symbol
-#     versions it needs (ldd -r), PostgreSQL's own binaries included;
+#     versions it needs, PostgreSQL's own binaries included;
 #   - a fresh cluster starts, and every packaged extension can be created
 #     and used.
 #
@@ -27,13 +27,15 @@ mkdir -p "$INSTALL"
 tar -xzf "$PG_ARCHIVE" -C "$INSTALL" --strip-components=1
 tar -xzf "$POSTGIS_ARCHIVE" -C "$INSTALL" --strip-components=1
 
-echo "==> Checking every library resolves (glibc $(getconf GNU_LIBC_VERSION 2>/dev/null || echo unknown))"
+echo "==> Checking every library resolves ($(getconf GNU_LIBC_VERSION 2>/dev/null || echo 'unknown libc'))"
 failed=0
 for f in "$INSTALL"/bin/postgres "$INSTALL"/bin/psql "$INSTALL"/lib/*.so*; do
   [ -f "$f" ] && [ ! -L "$f" ] || continue
-  # ldd -r also performs the relocations, so it reports symbols and
-  # symbol versions that are missing, not just missing files.
-  problems=$(ldd -r "$f" 2>&1 | grep -E "not found|undefined symbol" || true)
+  # "not found" covers both a missing library and a missing symbol version
+  # (e.g. "version `GLIBC_2.38' not found"). Undefined symbols are not
+  # checked: server modules get theirs (palloc, errmsg, ...) from the
+  # postgres executable when loaded -- CREATE EXTENSION below checks that.
+  problems=$(ldd "$f" 2>&1 | grep -E "not found" || true)
   if [ -n "$problems" ]; then
     echo "  $f:" >&2
     echo "$problems" | sed 's/^/    /' >&2
