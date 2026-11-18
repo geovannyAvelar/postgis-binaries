@@ -2,8 +2,8 @@
 # Install a PostGIS archive the way pachyderm does -- extracted over a
 # theseus-rs PostgreSQL install -- and check it works on this system:
 #
-#   - every library in the overlaid install resolves, with the symbol
-#     versions it needs, PostgreSQL's own binaries included;
+#   - every library the archive brings resolves in the overlaid install,
+#     with the symbol versions it needs, and so do postgres and psql;
 #   - a fresh cluster starts, and every packaged extension can be created
 #     and used.
 #
@@ -28,8 +28,13 @@ tar -xzf "$PG_ARCHIVE" -C "$INSTALL" --strip-components=1
 tar -xzf "$POSTGIS_ARCHIVE" -C "$INSTALL" --strip-components=1
 
 echo "==> Checking every library resolves ($(getconf GNU_LIBC_VERSION 2>/dev/null || echo 'unknown libc'))"
+# What PostGIS brings, plus the server and client it runs in. PostgreSQL's
+# own optional modules aren't checked: some theseus-rs releases (e.g. 13)
+# link system libraries (libssl, libuuid, ...) a minimal system may lack,
+# whatever PostGIS does.
+PACKAGED=$(tar -tzf "$POSTGIS_ARCHIVE" | sed 's|^[^/]*/||' | grep -E '^lib/.+\.so' || true)
 failed=0
-for f in "$INSTALL"/bin/postgres "$INSTALL"/bin/psql "$INSTALL"/lib/*.so*; do
+for f in "$INSTALL"/bin/postgres "$INSTALL"/bin/psql $(printf "$INSTALL/%s\n" $PACKAGED); do
   [ -f "$f" ] && [ ! -L "$f" ] || continue
   # "not found" covers both a missing library and a missing symbol version
   # (e.g. "version `GLIBC_2.38' not found"). Undefined symbols are not
