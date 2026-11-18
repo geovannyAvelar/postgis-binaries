@@ -4,11 +4,11 @@
 # package expects (a single top-level dir, overlaid onto an existing
 # theseus-rs postgresql-binaries install).
 #
-# Build it on an OLD distribution -- CI uses Debian 11 (glibc 2.31) -- not
-# on the runner itself. Everything built here, and every library bundled
-# from this system, needs at least this system's glibc. Building older than
-# theseus-rs's own baseline (its binaries need glibc 2.34) means the archive
-# runs anywhere the PostgreSQL it overlays runs; building on a newer system
+# Build it on an OLD distribution -- CI uses AlmaLinux 9 (glibc 2.34) --
+# not on the runner itself. Everything built here, and every library
+# bundled from this system, needs at least this system's glibc. Building on
+# theseus-rs's own baseline (its binaries need glibc 2.34) or older means
+# the archive runs anywhere the PostgreSQL it overlays runs; building on a newer system
 # (e.g. ubuntu-24.04, glibc 2.39) produced archives that needed glibc 2.38
 # and left PostgreSQL itself unable to start on Debian 12 / Ubuntu 22.04 /
 # RHEL 9, because they also replaced PostgreSQL's own libraries.
@@ -58,7 +58,7 @@ tar -xzf pg.tar.gz -C pg --strip-components=1
 PG_CONFIG="$WORKDIR/pg/bin/pg_config"
 
 # GEOS and PROJ are built from source instead of taken from the build
-# system: its packages (Debian 11: GEOS 3.9, PROJ 7.2) are too old for all
+# system: its packages (EPEL 9: GEOS 3.10, PROJ 8.2) are too old for all
 # of PostGIS's functionality, and building PROJ without curl and libtiff
 # drops most of what it would otherwise pull into the archive. Its
 # sqlite3 is PostgreSQL's own copy at runtime.

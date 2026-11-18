@@ -10,8 +10,8 @@ result. No PostGIS source is patched.
 
 | Platform | Script | Validated |
 |---|---|---|
-| linux/amd64 | `build-linux.sh` | **Yes** — built, packaged, and loaded (`CREATE EXTENSION`) end to end against PG 17.11 / PostGIS 3.5.7 |
-| linux/arm64 | `build-linux.sh` | No — same script, untested runner |
+| linux/amd64 | `build-linux.sh` | **Yes** — every build is smoke-tested, in CI, on Debian 12, Ubuntu 22.04 and 24.04, Rocky Linux 9 and Fedora 41 |
+| linux/arm64 | `build-linux.sh` | **Yes** — same as amd64, on arm64 runners |
 | macOS (both arches) | `build-macos.sh` | No — written from the same design, not run on real hardware |
 | Windows/amd64 | `build-windows.sh` | No — the least standardized of the three; see caveats in the script itself |
 
@@ -25,23 +25,57 @@ result. No PostGIS source is patched.
   from v1 rather than half-solved.
 - `--without-sfcgal`, `--without-protobuf` — unevaluated, not deliberately excluded forever.
 
+PostgreSQL 13–18 are built (PostGIS 3.5 supports 12–18; theseus-rs has no binaries for 12's last releases).
+
 ## How it works
 
-Each build:
+Each Linux build runs in an **AlmaLinux 9 container (glibc 2.34)**, not on
+the CI runner itself:
 
-1. Downloads the matching `theseus-rs/postgresql-binaries` release for the
-   target Postgres major version + platform, and builds PostGIS against its
-   `pg_config`.
-2. Runs `make install` into a staging prefix.
-3. Walks the resulting `.so`/`.dylib`/`.dll` dependency closure and bundles
-   everything that isn't part of the OS's own guaranteed-present library set,
-   rewriting each binary to prefer the bundled copy (`patchelf` RPATH on
-   Linux, `install_name_tool` + `@loader_path` on macOS). This step is what
-   makes the archive installable with no `apt`/`brew`/admin rights on the
-   user's machine — confirmed by extracting the Linux archive fresh and
-   running real geometry queries against it.
-4. Packages `lib/` (or `bin/` on Windows — see below) + `share/extension/`
-   into a single-top-dir archive: `postgis-<version>-pg<major>-<target-triple>.tar.gz`.
+1. Downloads the newest `theseus-rs/postgresql-binaries` release of the
+   target PostgreSQL major version + platform (`resolve-pg-tag.sh`), and
+   builds PostGIS against its `pg_config`.
+2. Builds GEOS and PROJ from source (versions pinned in `build-linux.sh`) —
+   the distribution's own are too old for all of PostGIS — PROJ without curl and
+   libtiff, which keeps the bundled dependency set small.
+3. Runs `make install` into a staging prefix.
+4. Walks the extensions' dependency closure **the way the installed
+   extension resolves it** — the PostgreSQL install's `lib/` first — and
+   bundles only what PostgreSQL doesn't already ship there, rewriting each
+   binary's RPATH to `$ORIGIN` with `patchelf`. glibc itself is the system's.
+   `proj.db` goes in `share/proj/`, where the bundled PROJ looks for it.
+5. Fails the build if any packaged file would overwrite one of PostgreSQL's,
+   or if the package needs a newer glibc than PostgreSQL itself.
+6. Packages `lib/` (or `bin/` on Windows — see below) + `share/` into a
+   single-top-dir archive: `postgis-<version>-pg<major>-<target-triple>.tar.gz`.
+7. Smoke-tests it (`smoke-test-linux.sh`): extracts PostgreSQL and the
+   archive over it, as pachyderm does, checks every library and symbol
+   version resolves (`ldd -r`), starts a cluster, creates every extension,
+   and runs GEOS, PROJ, GML, GeoJSON, topology and address-standardizer
+   queries. CI then repeats this on other distributions.
+
+### Why the old glibc
+
+Everything built, and every library bundled from the build system, needs
+at least that system's glibc. The theseus-rs PostgreSQL binaries need glibc
+2.34, so building on a system with that glibc (or older) makes PostGIS run
+wherever the PostgreSQL it overlays runs. (Debian 11, with glibc 2.31,
+would be older still, but its LTS support ended in 2026 and its security
+packages are gone from the mirrors.) Archives built on Ubuntu 24.04 (before
+2026-11) needed glibc 2.38 and replaced 15 of PostgreSQL's own libraries,
+which left PostgreSQL unable to start on Debian 12, Ubuntu 22.04 and RHEL 9.
+
+### Building and publishing
+
+`build.yml` runs on a `v*` tag push (builds every platform and publishes)
+or manually (pick the PostGIS version and platforms; it only publishes with
+`publish` checked). Rebuilding a version that's already published replaces
+its archives; pachyderm checks each download against its GitHub digest.
+
+```bash
+gh workflow run build.yml -f postgis_version=3.5.7 -f platforms=linux           # build + test only
+gh workflow run build.yml -f postgis_version=3.5.7 -f platforms=linux -f publish=true
+```
 
 ## Known gaps / open questions
 
@@ -58,12 +92,7 @@ Each build:
   *self-built* GEOS/PROJ/etc., which suggests prebuilt MinGW packages may not
   be a drop-in equivalent. Needs real testing on a Windows runner before
   trusting it.
-- Even the "core" (non-raster) module bundles ~47 dependencies on Linux,
-  mostly because the distro's `libproj` links `libcurl` for on-demand CRS
-  grid downloads. Decided to ship that as-is for now rather than rebuild a
-  curl-free PROJ; revisit if archive size (~30MB) becomes a real problem.
-- Not yet wired into pachyderm itself — this repo only produces the
-  binaries. The `postgres` package's `extensions.go`/`install.go` need a
-  new installer path (mirroring `github.go`/`install.go`'s existing
-  theseus-rs download flow) before `pachyderm extension install postgis`
-  can exist.
+- PROJ is built without curl, so it can't download transformation grids on
+  demand; transformations that need a grid fall back to less accurate ones.
+- Pachyderm installs these with `pachyderm extension get-postgis`, and
+  refuses archives that need a newer glibc than the system has.
